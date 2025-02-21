@@ -102,12 +102,23 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 
 // Define Mongoose Schemas
 const studentSchema = new mongoose.Schema({
+    studentId: { type: String, required: true, unique: true },
     firstName: String,
     lastName: String,
     age: Number,
     photo: String
 });
+
 const Student = mongoose.model('Student', studentSchema);
+
+// Counter Schema for generating student IDs
+const counterSchema = new mongoose.Schema({
+    year: String,
+    sequence: { type: Number, default: 0 }
+});
+
+const Counter = mongoose.model('Counter', counterSchema);
+
 
 const adminSchema = new mongoose.Schema({
     telegramId: String
@@ -135,8 +146,10 @@ const isAdmin = async (ctx, next) => {
 
  bot.command('start', (ctx) => {
     ctx.reply('Welcome to the Admin Management Bot! Choose an action below:', Markup.keyboard([
+        ['Register', 'Ask a Question.'],
         ['Add Admin', 'Show Admins'],
-        ['Export Students', 'Other Action']
+        ['Remove Admin', 'Remove Student'],
+        ['Export Students','List All Students' ]
     ])
     .oneTime(false) // Keyboard remains open after use
     .resize() // Resizes the keyboard
@@ -144,7 +157,7 @@ const isAdmin = async (ctx, next) => {
 });
 
 
- bot.command('make_admin', async (ctx) => {
+ bot.hears('Add Admin', async (ctx) => {
      if (ctx.from.id.toString() !== SUPER_ADMIN_ID) {
          console.log(`Unauthorized attempt by ${ctx.from.id}`);
          return ctx.reply('You are not allowed to do this.');
@@ -185,7 +198,7 @@ const isAdmin = async (ctx, next) => {
 
 
 // Super Admin Command: /remove_admin (Super Admin only)
-bot.command('remove_admin', async (ctx) => {
+bot.hears('Remove Admin', async (ctx) => {
     if (ctx.from.id.toString() !== SUPER_ADMIN_ID) return ctx.reply('You are not allowed to do this.');
 
     const removeAdminId = ctx.message.text.split(' ')[1];
@@ -228,29 +241,59 @@ bot.hears('Show Admins', async (ctx) => {
 
 
 // Command: /students_list (Admin & Super Admin)
-bot.command('students_list', isAdmin, async (ctx) => {
+bot.hears('List All Students', isAdmin, async (ctx) => {
     const students = await Student.find();
     if (students.length === 0) return ctx.reply('No students found.');
 
     for (const student of students) {
+        const studentId = student.studentId || 'Not Set'; // If studentId is null, set it to 'Not Set'
+        const firstName = student.firstName || 'Not Set';  // If firstName is null, set it to 'Not Set'
+        const lastName = student.lastName || 'Not Set';    // If lastName is null, set it to 'Not Set'
+        const age = student.age || 'Not Set';              // If age is null, set it to 'Not Set'
+
         if (student.photo) {
             await ctx.replyWithPhoto(student.photo, {
-                caption: `📌 *Name:* ${student.firstName} ${student.lastName}
-📅 *Age:* ${student.age}`,
+                caption: `🆔 *Student ID:* ${studentId}
+📌 *Name:* ${firstName} ${lastName}
+📅 *Age:* ${age}`,
                 parse_mode: "Markdown"
             });
         } else {
             // If no photo, send text-only message
-            await ctx.reply(`📌 *Name:* ${student.firstName} ${student.lastName}
-📅 *Age:* ${student.age}`);
+            await ctx.reply(`🆔 *Student ID:* ${studentId}
+📌 *Name:* ${firstName} ${lastName}
+📅 *Age:* ${age}`);
         }
     }
 });
 
 
+
 // Student Registration Wizard
+
+// Function to generate student ID
+async function generateStudentId() {
+    const year = new Date().getFullYear().toString();
+    const counter = await Counter.findOne({ year });
+
+    if (!counter) {
+        // If counter for the year doesn't exist, create one
+        const newCounter = new Counter({ year, sequence: 1 });
+        await newCounter.save();
+        return `FSSS/1/${year}`;
+    }
+
+    // Increment the sequence and update the counter
+    counter.sequence++;
+    await counter.save();
+
+    return `FSSS/${counter.sequence}/${year}`;
+}
+
+
+
 const registrationWizard = new Scenes.WizardScene(
-    'register',
+    'Register',
     async (ctx) => {
         ctx.reply('Please enter your first name.');
         return ctx.wizard.next();
@@ -283,9 +326,12 @@ const registrationWizard = new Scenes.WizardScene(
         const photo = ctx.message.photo[0].file_id;
         const { firstName, lastName, age } = ctx.wizard.state;
 
-        const newStudent = new Student({ firstName, lastName, age, photo });
+        // Generate Student ID
+        const studentId = await generateStudentId();
+
+        const newStudent = new Student({ firstName, lastName, age, photo, studentId });
         await newStudent.save();
-        ctx.reply('You have been registered successfully!');
+        ctx.reply(`You have been registered successfully! Your student ID is: ${studentId}`);
 
         return ctx.scene.leave();
     }
@@ -293,6 +339,7 @@ const registrationWizard = new Scenes.WizardScene(
 
 // Create Scene Manager
 const stage = new Scenes.Stage([registrationWizard]);
+
 
 bot.use(session());
 bot.use(stage.middleware());
@@ -303,23 +350,23 @@ bot.start((ctx) => {
 });
 
 // Command: /register (Start Registration Wizard)
-bot.command('register', (ctx) => ctx.scene.enter('register'));
+bot.hears('Register', (ctx) => ctx.scene.enter('Register'));
 
-bot.command('students_list', isAdmin, async (ctx) => {
+bot.hears('List All Students', isAdmin, async (ctx) => {
     const students = await Student.find();
     let response = students.map(s => `${s.firstName} ${s.lastName}, Age: ${s.age}`).join('\n');
     ctx.reply(response || 'No students found.');
 });
 
 // Command: /support
-bot.command('support', (ctx) => {
+bot.hears('Ask a Question.', (ctx) => {
     ctx.reply('Please enter your question.');
     bot.on('text', async (ctx) => {
         const question = ctx.message.text;
         await new Support({ userId: ctx.from.id, question }).save();
         const admins = await Admin.find();
         admins.forEach(admin => {
-            bot.telegram.sendMessage(admin.telegramId, `New support question: ${question}`);
+            bot.telegram.sendMessage(admin.telegramId, `New question: ${question}`);
         });
         ctx.reply('Your question has been sent to the admins.');
     });
@@ -368,5 +415,40 @@ bot.hears('Export Students', isAdmin, async (ctx) => {
     }
 });
 
+// ✅ Step 1: Ask for Student ID
+bot.hears('Remove Student', isAdmin, async (ctx) => {
+    ctx.reply('📌 Please send the ID of the student you want to remove.');
+    ctx.session.waitingForStudentID = true;
+});
 
-bot.launch();
+// ✅ Step 2: Capture and remove the student by ID
+bot.on('text', async (ctx) => {
+    if (!ctx.session.waitingForStudentID) return;
+
+    const studentId = ctx.message.text.trim();
+    ctx.session.waitingForStudentID = false;
+
+    if (!/^[0-9a-fA-F]{24}$/.test(studentId)) { // Check if it's a valid MongoDB ObjectId
+        return ctx.reply('⚠️ Invalid Student ID format. Please provide a valid ID.');
+    }
+
+    try {
+        const result = await Student.findByIdAndDelete(studentId);
+        if (!result) {
+            return ctx.reply('❌ Student not found. Please check the ID and try again.');
+        }
+        ctx.reply(`✅ Student with ID ${studentId} has been removed.`);
+    } catch (error) {
+        console.error('❌ Error removing student:', error);
+        ctx.reply('⚠️ An error occurred while removing the student.');
+    }
+});
+
+const PORT = process.env.PORT || 3000;  // Default to 3000 if no PORT is set
+bot.launch().then(() => {
+    console.log(`Bot is running on port ${PORT}`);
+}).catch(error => {
+    console.error('Error launching bot:', error);
+});
+
+
