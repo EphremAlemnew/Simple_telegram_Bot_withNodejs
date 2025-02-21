@@ -444,7 +444,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;  // Default to 3000 if no PORT is set
+const PORT = process.env.PORT || 4001;  // Default to 3000 if no PORT is set
 bot.launch().then(() => {
     console.log(`Bot is running on port ${PORT}`);
 }).catch(error => {
