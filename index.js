@@ -139,22 +139,32 @@ const isAdmin = async (ctx, next) => {
     ctx.reply('You are not an admin.');
 };
 
-// Super Admin Command: /make_admin (Super Admin only)
- // Replace with your Telegram ID
+bot.command('start', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    // Check if the user is Super Admin
+    if (userId === SUPER_ADMIN_ID) {
+        return ctx.reply('Welcome to the Admin Panel!', Markup.keyboard([
+            ['Add Admin', 'Show Admins'],
+            ['Remove Admin', 'Remove Student'],
+            ['Export Students', 'List All Students']
+        ]).oneTime(false).resize());
+    }
 
- // Replace with your Telegram ID
+    // Check if the user is an Admin
+    const admin = await Admin.findOne({ telegramId: userId });
+    if (admin) {
+        return ctx.reply('Welcome to Student Registration Panel!', Markup.keyboard([
+            ['Register','Edit Student']
+        ]).oneTime(false).resize());
+    }
 
- bot.command('start', (ctx) => {
-    ctx.reply('Welcome to the Admin Management Bot! Choose an action below:', Markup.keyboard([
-        ['Register', 'Ask a Question.'],
-        ['Add Admin', 'Show Admins'],
-        ['Remove Admin', 'Remove Student'],
-        ['Export Students','List All Students' ]
-    ])
-    .oneTime(false) // Keyboard remains open after use
-    .resize() // Resizes the keyboard
-    );
+    // If the user is neither an admin nor the super admin
+    ctx.reply('Welcome to FSSS Ask Questions Bot!', Markup.keyboard([
+        ['Ask a Question.']
+    ]).oneTime(false).resize());
 });
+
 
 
  bot.hears('Add Admin', async (ctx) => {
@@ -193,9 +203,6 @@ const isAdmin = async (ctx, next) => {
      }
  });
  
-
-
-
 
 // Super Admin Command: /remove_admin (Super Admin only)
 bot.hears('Remove Admin', async (ctx) => {
@@ -290,8 +297,6 @@ async function generateStudentId() {
     return `FSSS/${counter.sequence}/${year}`;
 }
 
-
-
 const registrationWizard = new Scenes.WizardScene(
     'Register',
     async (ctx) => {
@@ -323,19 +328,46 @@ const registrationWizard = new Scenes.WizardScene(
             ctx.reply('Please send a valid photo.');
             return;
         }
-        const photo = ctx.message.photo[0].file_id;
+        ctx.wizard.state.photo = ctx.message.photo[0].file_id;
+
         const { firstName, lastName, age } = ctx.wizard.state;
 
-        // Generate Student ID
-        const studentId = await generateStudentId();
+        // Display confirmation message
+        await ctx.reply(
+            `Please confirm your details:\n\n` +
+            `📌 *First Name:* ${firstName}\n` +
+            `📌 *Last Name:* ${lastName}\n` +
+            `📌 *Age:* ${age}\n\n` +
+            `✅ Click "Save" to confirm or ❌ "Cancel" to discard.`,
+            Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Save', 'confirm_registration')],
+                [Markup.button.callback('❌ Cancel', 'cancel_registration')]
+            ])
+        );
 
-        const newStudent = new Student({ firstName, lastName, age, photo, studentId });
-        await newStudent.save();
-        ctx.reply(`You have been registered successfully! Your student ID is: ${studentId}`);
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        if (!ctx.callbackQuery) return;
 
-        return ctx.scene.leave();
+        const action = ctx.callbackQuery.data;
+        if (action === 'confirm_registration') {
+            const { firstName, lastName, age, photo } = ctx.wizard.state;
+            const studentId = await generateStudentId();
+
+            const newStudent = new Student({ firstName, lastName, age, photo, studentId });
+            await newStudent.save();
+
+            await ctx.reply(`🎉 You have been registered successfully!\nYour student ID is: ${studentId}`);
+            return ctx.scene.leave();
+        } else if (action === 'cancel_registration') {
+            await ctx.reply('❌ Registration has been cancelled.');
+            return ctx.scene.leave();
+        }
     }
 );
+
+
 
 // Create Scene Manager
 const stage = new Scenes.Stage([registrationWizard]);
@@ -359,18 +391,63 @@ bot.hears('List All Students', isAdmin, async (ctx) => {
 });
 
 // Command: /support
-bot.hears('Ask a Question.', (ctx) => {
-    ctx.reply('Please enter your question.');
-    bot.on('text', async (ctx) => {
-        const question = ctx.message.text;
-        await new Support({ userId: ctx.from.id, question }).save();
-        const admins = await Admin.find();
-        admins.forEach(admin => {
-            bot.telegram.sendMessage(admin.telegramId, `New question: ${question}`);
-        });
-        ctx.reply('Your question has been sent to the admins.');
-    });
+
+
+bot.hears('Ask a Question.', async (ctx) => {
+    ctx.session = {}; // Reset session data
+    await ctx.reply('📝 Please enter your question.');
 });
+
+// Capture user's question
+bot.on('text', async (ctx) => {
+    if (!ctx.session || ctx.session.questionConfirmed) return; // Ignore if session not started or already confirmed
+    
+    ctx.session.question = ctx.message.text;
+    
+    await ctx.reply(
+        `❓ *Your Question:*\n"${ctx.session.question}"\n\nWhat do you want to do?`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Send', 'send_question')],
+            [Markup.button.callback('✏️ Edit', 'edit_question')],
+            [Markup.button.callback('❌ Cancel', 'cancel_question')]
+        ])
+    );
+});
+
+// Handle Send button
+bot.action('send_question', async (ctx) => {
+    if (!ctx.session.question) return;
+    
+    ctx.session.questionConfirmed = true; // Mark question as confirmed
+    const question = ctx.session.question;
+
+    // Save to database
+    await new Support({ userId: ctx.from.id, question }).save();
+
+    // Send to first admin in database (replace this logic as needed)
+    const admin = await Admin.findOne();
+    if (admin) {
+        await bot.telegram.sendMessage(admin.telegramId, `📩 New question from user ${ctx.from.id}:\n\n"${question}"`);
+    }
+
+    await ctx.reply('✅ Your question has been sent to an admin.');
+    ctx.session = {}; // Clear session after sending
+});
+
+// Handle Edit button
+bot.action('edit_question', async (ctx) => {
+    if (!ctx.session.question) return;
+    
+    await ctx.reply('✏️ Please enter your revised question.');
+    ctx.session.questionConfirmed = false; // Allow editing
+});
+
+// Handle Cancel button
+bot.action('cancel_question', async (ctx) => {
+    await ctx.reply('❌ Your question has been cancelled.');
+    ctx.session = {}; // Clear session
+});
+
 const fs = require('fs');
 const { Parser } = require('json2csv');
 
